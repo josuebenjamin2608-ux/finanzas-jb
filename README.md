@@ -14,5 +14,8 @@ App web instalable (PWA) de finanzas personales. Versión 0.1: la interfaz del p
 
 ## Publicación
 
-Sitio estático en GitHub Pages desde la rama `main` (carpeta raíz). No requiere compilación.
+URL: https://josuebenjamin2608-ux.github.io/finanzas-jb/
+
+Sitio estático en GitHub Pages, publicado desde la rama `gh-pages` (copia de `main`, carpeta raíz). No requiere compilación.
+Para publicar: `git push origin main main:gh-pages`.
 Al publicar cambios, sube `VERSION` en `sw.js` para que los celulares tomen la versión nueva.
