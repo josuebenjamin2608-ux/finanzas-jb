@@ -18,11 +18,11 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=Figtree:wght@400;500;600;700&display=swap">
-<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/app.css?v=0.2.1">
 </head>
 <body>
 <div class="stage">
-  <div class="proto"><span><b>Finanzas JB</b> · v0.2</span><button id="mapBtn" type="button" data-a="map">Pantallas</button></div>
+  <div class="proto"><span><b>Finanzas JB</b> · v0.2.1</span><button id="mapBtn" type="button" data-a="map">Pantallas</button></div>
   <div class="device" id="device">
     <div id="host"></div>
     <button class="fab" id="fab" type="button" data-a="sheet" data-m="kbd"></button>
@@ -31,8 +31,8 @@
     <div id="toastHost"></div>
   </div>
 </div>
-<script src="js/store.js"></script>
-<script src="js/app.js"></script>
+<script src="js/store.js?v=0.2.1"></script>
+<script src="js/app.js?v=0.2.1"></script>
 <script>
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });
