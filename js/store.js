@@ -1,18 +1,23 @@
-/* Finanzas JB · almacenamiento local (preparado, todavía NO conectado a la interfaz).
+/* Finanzas JB · almacenamiento en el celular (localStorage).
 
-   Estructura pensada para la siguiente etapa: guardar en el propio celular
-   (localStorage) las cuentas y los movimientos del modelo financiero ya cerrado.
-   La interfaz sigue usando js/datos-ejemplo.js hasta que se conecte.
+   Distingue dos estados:
+   - Instalación nueva: no existe nada guardado (exists() === false). La app abre
+     el primer uso "¿Cuánto tienes hoy?".
+   - Usuario con datos: existe el registro guardado, aunque esté vacío porque
+     saltó la configuración. La app entra directo a Inicio.
 
-   Forma de los registros (mismos campos que ya usa la interfaz):
+   Nunca se borra ni se reinicia al abrir o actualizar la app. Si en el futuro
+   cambia la forma de los datos, se migra en migrate(); jamás se descarta.
+
+   Forma de los registros:
 
    Cuenta {
      id, name,
      cls: 'disp' | 'deuda' | 'ahorro' | 'persona',   // Disponible, Tarjeta/préstamo, Ahorro e inversión, Persona
      sub?: 'tarjeta' | 'credito',                     // solo en Tarjeta/préstamo
-     pending?: boolean,                               // saldo por confirmar
      archived?: boolean
    }
+   // "Saldo por confirmar" no se guarda: es una cuenta (que no es Persona) sin ajuste de apertura.
 
    Movimiento {
      id, d: 'AAAA-MM-DD', t: 'HH:MM',
@@ -23,40 +28,54 @@
      cat?, sub?,                 // categoría y subcategoría
      desc?, phrase?,             // descripción y frase registrada
      link?,                      // reembolso -> gasto original (única relación entre movimientos)
-     motivo?: 'apertura' | 'conciliacion'   // solo ajustes
+     motivo?: 'apertura' | 'conciliacion',   // solo ajustes
+     saldo?                      // solo ajustes: saldo escrito, con signo (negativo = debes)
    }
 
-   El saldo de una cuenta nunca se guarda: se calcula desde sus movimientos.
+   El saldo de una cuenta nunca se guarda: se calcula desde sus movimientos y ajustes.
 */
 (function(){
 "use strict";
 const KEY = 'finanzas-jb';
 const VERSION = 1;
-const empty = () => ({version:VERSION, cuentas:[], movimientos:[], preferencias:{}});
 
-function read(){
-  try{
-    const raw = localStorage.getItem(KEY);
-    if(!raw) return empty();
-    const db = JSON.parse(raw);
-    return db && db.version===VERSION ? db : empty();
-  }catch(e){ return empty(); }
+function migrate(db){
+  // Versión 1 es la primera con datos reales. Las siguientes versiones agregan sus pasos aquí.
+  db.cuentas = db.cuentas || [];
+  db.movimientos = db.movimientos || [];
+  db.preferencias = db.preferencias || {};
+  db.version = VERSION;
+  return db;
 }
-function write(db){
-  try{ localStorage.setItem(KEY, JSON.stringify(db)); return true; }catch(e){ return false; }
-}
-const newId = p => p + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 
 window.FJB_STORE = {
   VERSION,
-  load: read,
-  save: write,
-  hasData(){ const db=read(); return db.cuentas.length>0 || db.movimientos.length>0; },
-  addCuenta(c){ const db=read(); const x=Object.assign({id:newId('c')}, c); db.cuentas.push(x); write(db); return x; },
-  updateCuenta(id, patch){ const db=read(); const c=db.cuentas.find(x=>x.id===id); if(c){ Object.assign(c, patch); write(db); } return c; },
-  addMovimiento(m){ const db=read(); const x=Object.assign({id:newId('m')}, m); db.movimientos.push(x); write(db); return x; },
-  updateMovimiento(id, patch){ const db=read(); const m=db.movimientos.find(x=>x.id===id); if(m){ Object.assign(m, patch); write(db); } return m; },
-  removeMovimiento(id){ const db=read(); db.movimientos=db.movimientos.filter(x=>x.id!==id); write(db); },
-  reset(){ try{ localStorage.removeItem(KEY); }catch(e){} }
+  exists(){
+    try{ return localStorage.getItem(KEY) !== null; }catch(e){ return false; }
+  },
+  // Estado vacío de una instalación nueva: sin cuentas, sin movimientos, sin saldos.
+  empty(){
+    const now = new Date();
+    return {version:VERSION, creado:now.toISOString(), cuentas:[], movimientos:[], preferencias:{}};
+  },
+  load(){
+    try{
+      const raw = localStorage.getItem(KEY);
+      if(raw === null) return null;
+      return migrate(JSON.parse(raw));
+    }catch(e){
+      // Datos ilegibles: se guarda una copia antes de cualquier otra cosa para no perderlos.
+      try{ const raw = localStorage.getItem(KEY); if(raw) localStorage.setItem(KEY+'-respaldo-'+Date.now(), raw); }catch(_){}
+      return null;
+    }
+  },
+  save(db){
+    try{ localStorage.setItem(KEY, JSON.stringify(db)); return true; }catch(e){ return false; }
+  },
+  // Pide al navegador que no borre estos datos cuando necesite espacio.
+  persist(){
+    try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
+  },
+  newId(p){ return p + Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 };
 })();

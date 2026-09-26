@@ -1,6 +1,6 @@
-/* Finanzas JB · datos de ejemplo (ficticios).
-   Solo sirven para ver la interfaz funcionando. Se reemplazarán por los datos
-   guardados del usuario cuando se conecte la persistencia (ver js/store.js). */
+/* Finanzas JB · datos de ejemplo (ficticios) del prototipo.
+   SOLO para desarrollo y referencia. La app publicada NO carga este archivo:
+   no está en index.html ni en sw.js. Usa el formato antiguo del prototipo (campo ap). */
 (function(){
 "use strict";
 /* ---------- Datos ficticios ---------- */

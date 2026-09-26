@@ -34,23 +34,48 @@ const P = {
 const I = n => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
 
 /* ---------- Datos ----------
-   Por ahora vienen de js/datos-ejemplo.js (ficticios). Cuando exista la
-   persistencia real (js/store.js), aquí se cargarán desde el almacenamiento. */
-const {TODAY, INSTALL, CATS, INCATS, CLS, A, M} = window.FJB_DATOS;
+   Vienen del almacenamiento del celular (js/store.js). Una instalación nueva
+   empieza vacía: sin cuentas, sin movimientos y sin saldos. */
+const CATS = [
+  {n:'Comida', subs:['Mercado','Restaurantes']},
+  {n:'Transporte', subs:['Taxi y apps','Gasolina']},
+  {n:'Vivienda', subs:['Arriendo','Servicios']},
+  {n:'Salud'},{n:'Personal'},{n:'Ocio'},{n:'Educación'},{n:'Regalos'},{n:'Financieros'},{n:'Otros'}
+];
+const INCATS = [{n:'Trabajo', subs:['Salario']},{n:'Rendimientos'},{n:'Otros'}];
+const CLS = {disp:'Disponible', deuda:'Tarjeta/préstamo', ahorro:'Ahorro e inversión', persona:'Persona'};
+
+const pad2 = n => String(n).padStart(2,'0');
+const isoDate = dt => dt.getFullYear()+'-'+pad2(dt.getMonth()+1)+'-'+pad2(dt.getDate());
+const hhmm = dt => pad2(dt.getHours())+':'+pad2(dt.getMinutes());
+const NOW = new Date();
+const TODAY = isoDate(NOW);
+const YESTERDAY = isoDate(new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate()-1));
+const PREV_MONTH_END = isoDate(new Date(NOW.getFullYear(), NOW.getMonth(), 0));
+const FIRST_RUN = !window.FJB_STORE.exists();
+let DB = window.FJB_STORE.load() || window.FJB_STORE.empty();
+const A = DB.cuentas, M = DB.movimientos;
+const INSTALL = DB.creado ? isoDate(new Date(DB.creado)) : TODAY;
+function persist(){ if(!window.FJB_STORE.save(DB)) toast('No se pudo guardar en este celular'); }
+function aperturaMov(accId, saldo, d, t){
+  return {id:window.FJB_STORE.newId('m'), d, t, type:'AJUSTE', motivo:'apertura', desc:'Saldo inicial', amt:Math.abs(saldo), saldo, acc:accId};
+}
+// Fecha para un ajuste de apertura: antes del primer movimiento de la cuenta, o ahora si no tiene.
+function aperturaWhen(accId){
+  const first = M.filter(m=>delta(m,accId)!==0).sort((a,b)=>(a.d+a.t).localeCompare(b.d+b.t))[0];
+  return first ? {d:first.d, t:'00:00'} : {d:TODAY, t:hhmm(new Date())};
+}
 
 /* ---------- Estado de la interfaz ---------- */
 const S = {
   stack:[{s:'inicio'}],
-  month:'2026-09',
+  month:TODAY.slice(0,7),
   filter:{acc:'', cat:''},
   askLater:false,
-  pendiente:{phrase:'gasolina 50 mil', open:true},
-  deleted:new Set(),
-  classified:{},
-  habitual:'bancolombia',
+  pendiente:{phrase:'', open:false},
   ui:{},           // estado temporal por pantalla
   sheet:null,
-  pu:{step:1, sel:{efectivo:true, bancolombia:true, nequi:true, visa:true}, amt:{efectivo:'150.000', bancolombia:'1.328.000', visa:'864.000'}, unk:{nequi:true}, hab:'bancolombia'},
+  pu:null,
   form:null
 };
 
@@ -59,29 +84,34 @@ const fmt = n => '$' + String(Math.round(Math.abs(n))).replace(/\B(?=(\d{3})+(?!
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const acc = id => A.find(a=>a.id===id);
 const mov = id => M.find(m=>m.id===id);
-const live = () => M.filter(m=>!S.deleted.has(m.id));
-const catOf = m => S.classified[m.id] || m.cat;
+const live = () => M;
+const catOf = m => m.cat;
+const refundOf = m => M.find(x=>x.type==='REEMBOLSO'&&x.link===m.id);
+const habitual = () => { const h=DB.preferencias.habitual; return acc(h)&&!acc(h).archived ? h : ((active().find(a=>a.cls==='disp'||a.sub==='tarjeta')||{}).id); };
 const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
 const DIAS = ['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
 const dparts = s => { const [y,m,d]=s.split('-').map(Number); return {y,m,d,wd:new Date(Date.UTC(y,m-1,d)).getUTCDay()}; };
 const monthName = ym => { const [y,m]=ym.split('-').map(Number); return MESES[m-1][0].toUpperCase()+MESES[m-1].slice(1)+' '+y; };
-const dayLabel = s => { if(s===TODAY) return 'Hoy'; if(s==='2026-09-25') return 'Ayer'; const p=dparts(s); return DIAS[p.wd][0].toUpperCase()+DIAS[p.wd].slice(1)+' '+p.d+' de '+MESES[p.m-1]; };
+const dayLabel = s => { if(s===TODAY) return 'Hoy'; if(s===YESTERDAY) return 'Ayer'; const p=dparts(s); return DIAS[p.wd][0].toUpperCase()+DIAS[p.wd].slice(1)+' '+p.d+' de '+MESES[p.m-1]; };
 const shortDate = s => { const p=dparts(s); return p.d+' '+MESES[p.m-1].slice(0,3); };
 const longDate = s => { const p=dparts(s); return DIAS[p.wd]+' '+p.d+' de '+MESES[p.m-1]+' de '+p.y; };
 const initials = n => n.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
 
 // Efecto de un movimiento sobre una cuenta (solo para mostrar datos ficticios coherentes)
 function delta(m, id){
-  if(m.type==='AJUSTE') return 0;
+  if(m.type==='AJUSTE') return m.acc===id ? (m.saldo||0) : 0;
   if(m.type==='GASTO') return m.acc===id ? -m.amt : 0;
   if(m.type==='INGRESO'||m.type==='REEMBOLSO') return m.acc===id ? m.amt : 0;
   if(m.type==='TRANSFERENCIA') return (m.to===id?m.amt:0) - (m.from===id?m.amt:0);
   return 0;
 }
-function flows(id){ let inn=0,out=0; live().forEach(m=>{const d=delta(m,id); if(d>0) inn+=d; else out-=d;}); return {inn,out}; }
-function bal(a){ const f=flows(a.id); return (a.ap||0)+f.inn-f.out; }
+function flows(id){ let inn=0,out=0; live().forEach(m=>{if(m.type==='AJUSTE') return; const d=delta(m,id); if(d>0) inn+=d; else out-=d;}); return {inn,out}; }
+const opening = id => M.filter(m=>m.type==='AJUSTE'&&m.motivo==='apertura'&&m.acc===id).reduce((s,m)=>s+(m.saldo||0),0);
+function bal(a){ return M.reduce((s,m)=>s+delta(m,a.id),0); }
+// Saldo por confirmar: cuenta (que no es Persona) sin ajuste de apertura.
+const isPending = a => a.cls!=='persona' && !M.some(m=>m.type==='AJUSTE'&&m.motivo==='apertura'&&m.acc===a.id);
 const active = () => A.filter(a=>!a.archived);
-const pendingAccs = () => active().filter(a=>a.pending);
+const pendingAccs = () => active().filter(isPending);
 function totals(){
   const act=active();
   const disp=act.filter(a=>a.cls==='disp').reduce((s,a)=>s+bal(a),0);
@@ -135,10 +165,10 @@ function rowSub(m){
   if(m.type==='AJUSTE') return 'Ajuste de apertura';
   const c=catOf(m);
   if(!c) return 'Sin categoría';
-  return c + (m.sub && !S.classified[m.id] ? ' · '+m.sub : '');
+  return c + (m.sub ? ' · '+m.sub : '');
 }
 function rowAmount(m, ctxAcc){
-  if(ctxAcc){ const d=m.type==='AJUSTE'? m.amt : delta(m,ctxAcc); return `<span class="${d>0?'pos':''}">${d>0?'+':d<0?'−':''}${fmt(d)}</span>`; }
+  if(ctxAcc){ const d=delta(m,ctxAcc); return `<span class="${d>0?'pos':''}">${d>0?'+':d<0?'−':''}${fmt(d)}</span>`; }
   if(m.type==='GASTO') return '−'+fmt(m.amt);
   if(m.type==='INGRESO'||m.type==='REEMBOLSO') return `<span class="pos">+${fmt(m.amt)}</span>`;
   return `<span class="muted">${fmt(m.amt)}</span>`;
@@ -156,7 +186,7 @@ function rowIcon(m){
 function rowBadges(m){
   const b=[];
   if(m.type==='GASTO' && !catOf(m)) b.push('<span class="badge unc">Sin clasificar</span>');
-  if(m.refundedBy && !S.deleted.has(m.refundedBy)) b.push('<span class="badge ref">Reembolsado</span>');
+  if(refundOf(m)) b.push('<span class="badge ref">Reembolsado</span>');
   if(m.type==='REEMBOLSO') b.push('<span class="badge ref">Reembolso</span>');
   if(m.type==='AJUSTE') b.push('<span class="badge adj">'+(m.motivo==='apertura'?'Ajuste de apertura':'Saldo real')+'</span>');
   return b.length?`<div class="badges">${b.join('')}</div>`:'';
@@ -176,8 +206,8 @@ const screens = {};
 
 screens.widget = () => `
   <div class="home">
-    <div class="clock">9:41</div>
-    <div class="date">sábado, 26 de septiembre</div>
+    <div class="clock">${hhmm(new Date())}</div>
+    <div class="date">${(()=>{const p=dparts(TODAY); return DIAS[p.wd]+', '+p.d+' de '+MESES[p.m-1];})()}</div>
     <div class="wdg" role="group" aria-label="Widget Finanzas JB">
       <div class="wdg-row">
         <button class="wdg-rec" type="button" data-a="sheet" data-m="mic">${I('mic')} Registrar</button>
@@ -195,62 +225,92 @@ screens.widget = () => `
     <div class="dock-note">Pantalla de tu teléfono con el widget. Toca el ícono JB para entrar a la app.</div>
   </div>`;
 
+/* Cuentas sugeridas en el primer uso. Son solo nombres para elegir: no traen saldos. */
+const PU_SUG = [['s-efectivo','Efectivo','disp',''],['s-bancolombia','Bancolombia','disp',''],['s-nequi','Nequi','disp',''],['s-visa','Visa Bancolombia','deuda','tarjeta'],['s-ahorro','Ahorro programado','ahorro','']];
+function puNew(){ return {step:1, sel:{}, amt:{}, unk:{}, hab:null, extra:[], otra:null}; }
+const puList = () => PU_SUG.map(([id,n,c,sub])=>({id,name:n,cls:c,sub})).concat(S.pu.extra);
+const puHas = name => active().some(a=>a.name.trim().toLowerCase()===name.trim().toLowerCase());
+const puChosen = () => puList().filter(x=>S.pu.sel[x.id]&&!puHas(x.name));
+const clsLabel = x => x.cls==='deuda' ? (x.sub==='credito'?'Crédito':'Tarjeta de crédito') : CLS[x.cls];
+function puSaldo(x){ const n=num(S.pu.amt[x.id]); return x.cls==='deuda' ? -n : n; }
+
 screens.primeruso = () => {
+  if(!S.pu) S.pu=puNew();
   const pu=S.pu, step=pu.step;
-  const opts=[['efectivo','Efectivo','Disponible'],['bancolombia','Bancolombia','Disponible'],['nequi','Nequi','Disponible'],['visa','Visa Bancolombia','Tarjeta de crédito'],['ahorro','Ahorro programado','Ahorro e inversión']];
   const bar = `<div class="steps">${[1,2,3,4].map(i=>`<i class="${i<=step?'on':''}"></i>`).join('')}</div>`;
   let body='', foot='';
   if(step===1){
+    const o=pu.otra;
     body=`<h2>¿Cuánto tienes hoy?</h2><p class="lead">Elige dónde tienes tu plata y tus deudas. Puedes saltar esto y hacerlo después.</p>
-      ${opts.map(([id,n,c])=>`<button class="pick ${pu.sel[id]?'on':''}" type="button" data-a="pu-sel" data-id="${id}"><span class="check">${pu.sel[id]?I('check'):''}</span><span class="n"><div>${n}</div><div>${c}</div></span></button>`).join('')}
-      <button class="pick" type="button" data-a="toast" data-t="Aquí se crearía otra cuenta (prototipo)"><span class="check">${I('plus')}</span><span class="n"><div>Otra</div><div>Escribe su nombre</div></span></button>`;
+      ${puList().map(x=>{ const has=puHas(x.name); return `<button class="pick ${pu.sel[x.id]&&!has?'on':''}" type="button" data-a="pu-sel" data-id="${x.id}" ${has?'disabled style="opacity:.55"':''}><span class="check">${pu.sel[x.id]&&!has?I('check'):''}</span><span class="n"><div>${esc(x.name)}</div><div>${has?'Ya la tienes':clsLabel(x)}</div></span></button>`; }).join('')}
+      ${o?`<div class="card" style="margin-bottom:8px"><input class="tinput" id="puOtraName" data-c="pu-otra-name" value="${esc(o.name)}" placeholder="Nombre de la cuenta" autocomplete="off">
+          <div class="seg" style="margin-top:10px">${[['disp','Disponible','Plata para el día a día'],['deuda','Tarjeta/préstamo','Lo que debes a un banco'],['ahorro','Ahorro e inversión','Plata apartada']].map(([k,n,sb])=>`<button class="opt ${o.cls===k?'on':''}" type="button" data-a="pu-otra-cls" data-v="${k}">${n}<small>${sb}</small></button>`).join('')}</div>
+          ${o.cls==='deuda'?`<div class="opts" style="margin-top:10px"><button class="opt ${o.sub==='tarjeta'?'on':''}" type="button" data-a="pu-otra-sub" data-v="tarjeta">Tarjeta de crédito</button><button class="opt ${o.sub==='credito'?'on':''}" type="button" data-a="pu-otra-sub" data-v="credito">Crédito</button></div>`:''}
+          <div class="row-btns"><button class="btn primary" type="button" data-a="pu-otra-add">Agregar</button><button class="btn quiet" type="button" data-a="pu-otra">Cancelar</button></div></div>`
+        :`<button class="pick" type="button" data-a="pu-otra"><span class="check">${I('plus')}</span><span class="n"><div>Otra</div><div>Escribe su nombre</div></span></button>`}`;
     foot=`<button class="btn primary block" type="button" data-a="pu-next">Continuar</button><button class="btn quiet block" type="button" data-a="pu-skip">Saltar todo</button>`;
   } else if(step===2){
-    const ids=Object.keys(pu.sel).filter(k=>pu.sel[k]);
     body=`<h2>Escribe cuánto hay en cada una</h2><p class="lead">En tarjetas escribe cuánto debes, en positivo. Si no lo sabes, marca “No sé”.</p>
-      ${ids.map(id=>{const a=acc(id); const debt=a.cls==='deuda'; return `<div class="pu-amt">
-        <div class="top"><b>${a.name}</b><span class="small muted">${debt?'¿Cuánto debes?':'¿Cuánto tienes?'}</span></div>
-        <div class="amount-input"><span>$</span><input id="pu-${id}" inputmode="numeric" placeholder="0" value="${pu.unk[id]?'':esc(pu.amt[id]||'')}" ${pu.unk[id]?'disabled':''} aria-label="Monto de ${a.name}"></div>
-        <label class="nosabe"><input type="checkbox" data-c="pu-unk" data-id="${id}" ${pu.unk[id]?'checked':''}> No sé</label>
+      ${puChosen().map(x=>{ const debt=x.cls==='deuda'; return `<div class="pu-amt">
+        <div class="top"><b>${esc(x.name)}</b><span class="small muted">${debt?'¿Cuánto debes?':'¿Cuánto tienes?'}</span></div>
+        <div class="amount-input"><span>$</span><input id="pu-${x.id}" inputmode="numeric" placeholder="0" value="${pu.unk[x.id]?'':esc(pu.amt[x.id]||'')}" ${pu.unk[x.id]?'disabled':''} aria-label="Monto de ${esc(x.name)}"></div>
+        <label class="nosabe"><input type="checkbox" data-c="pu-unk" data-id="${x.id}" ${pu.unk[x.id]?'checked':''}> No sé</label>
       </div>`;}).join('')}`;
     foot=`<button class="btn primary block" type="button" data-a="pu-next">Continuar</button><button class="btn quiet block" type="button" data-a="pu-back">Atrás</button>`;
   } else if(step===3){
-    const ids=Object.keys(pu.sel).filter(k=>pu.sel[k]&&(acc(k).cls==='disp'||acc(k).sub==='tarjeta'));
+    const opts=puChosen().filter(x=>x.cls==='disp'||x.sub==='tarjeta').map(x=>[x.id,x.name]).concat(active().filter(a=>a.cls==='disp'||a.sub==='tarjeta').map(a=>[a.id,a.name]));
+    if(!pu.hab || !opts.some(o=>o[0]===pu.hab)) pu.hab = opts.length?opts[0][0]:null;
     body=`<h2>¿Con cuál pagas casi siempre?</h2><p class="lead">La usaremos como cuenta sugerida mientras aprendemos cómo registras.</p>
-      <div class="list">${ids.map(id=>`<button class="radio ${pu.hab===id?'on':''}" type="button" data-a="pu-hab" data-id="${id}"><span class="dotr"></span><span class="n">${acc(id).name}</span></button>`).join('')}</div>`;
+      <div class="list">${opts.map(([id,n])=>`<button class="radio ${pu.hab===id?'on':''}" type="button" data-a="pu-hab" data-id="${id}"><span class="dotr"></span><span class="n">${esc(n)}</span></button>`).join('')}</div>`;
     foot=`<button class="btn primary block" type="button" data-a="pu-next">Continuar</button><button class="btn quiet block" type="button" data-a="pu-back">Atrás</button>`;
   } else {
-    const t=totals(); const unk=Object.keys(pu.unk).filter(k=>pu.unk[k]&&pu.sel[k]);
+    const ch=puChosen(), t=totals();
+    const disp=t.disp+ch.filter(x=>x.cls==='disp'&&!pu.unk[x.id]).reduce((s,x)=>s+puSaldo(x),0);
+    const tarj=t.tarj+ch.filter(x=>x.sub==='tarjeta'&&!pu.unk[x.id]).reduce((s,x)=>s+puSaldo(x),0);
+    const unk=ch.filter(x=>pu.unk[x.id]).map(x=>x.name).concat(pendingAccs().map(a=>a.name));
     body=`<h2>Listo, así empiezas</h2><p class="lead">Cada monto entra como saldo inicial de su cuenta, con la fecha y hora de hoy.</p>
-      <div class="card"><div class="label">Disponible</div><div class="big num">${fmt(t.disp)}</div>
-      <div class="patri" style="padding-top:6px"><span>Tarjetas por pagar</span><b class="num">${fmt(t.tarj)}</b></div></div>
-      ${unk.length?`<div class="warn">${I('alert')}<div><b>Cifras provisionales.</b> ${unk.map(k=>acc(k).name).join(', ')} queda con saldo por confirmar. Te lo preguntaremos cuando abras la app.</div></div>`:''}`;
+      <div class="card"><div class="label">Disponible</div><div class="big num">${disp<0?'−':''}${fmt(disp)}</div>
+      <div class="patri" style="padding-top:6px"><span>Tarjetas por pagar</span><b class="num">${fmt(tarj)}</b></div></div>
+      ${unk.length?`<div class="warn">${I('alert')}<div><b>Cifras provisionales.</b> ${unk.map(esc).join(', ')} queda con saldo por confirmar. Te lo preguntaremos cuando abras la app.</div></div>`:''}`;
     foot=`<button class="btn primary block" type="button" data-a="pu-done">Empezar</button><button class="btn quiet block" type="button" data-a="pu-back">Atrás</button>`;
   }
   return `<div class="pu">${bar}${body}<div class="pu-foot">${foot}</div></div>`;
 };
 
+// Crea las cuentas elegidas y sus ajustes de apertura (o las deja con saldo por confirmar).
+function puFinish(){
+  const pu=S.pu, d=TODAY, t=hhmm(new Date()), ids={};
+  puChosen().forEach(x=>{
+    const c={id:window.FJB_STORE.newId('c'), name:x.name, cls:x.cls};
+    if(x.cls==='deuda') c.sub=x.sub||'tarjeta';
+    A.push(c); ids[x.id]=c.id;
+    if(!pu.unk[x.id]) M.push(aperturaMov(c.id, puSaldo(x), d, t));
+  });
+  if(pu.hab) DB.preferencias.habitual = ids[pu.hab] || pu.hab;
+}
+
 screens.inicio = () => {
-  const t=totals(), pend=pendingAccs(), r=monthResult('2026-09');
-  const nq=acc('nequi');
-  const firstNequi = live().filter(m=>delta(m,'nequi')!==0).sort((a,b)=>(a.d+a.t).localeCompare(b.d+b.t))[0];
+  const t=totals(), pend=pendingAccs(), r=monthResult(TODAY.slice(0,7));
+  // Pregunta por el saldo anterior de la primera cuenta por confirmar que ya tenga movimientos.
+  let nq=null, firstNequi=null;
+  for(const a of pend){ const f=live().filter(m=>delta(m,a.id)!==0).sort((x,y)=>(x.d+x.t).localeCompare(y.d+y.t))[0]; if(f){ nq=a; firstNequi=f; break; } }
   const last = live().slice().sort(sortDesc).slice(0,5);
   return `
   <div class="topbar plain"><div class="wordmark">Finanzas <span>JB</span></div><button class="iconbtn" type="button" data-a="go" data-s="menu" aria-label="Abrir menú">${I('menu')}</button></div>
   <div class="hero">
     <button class="hero-tap" type="button" data-a="tab" data-s="cuentas">
       <div style="display:flex;gap:8px;align-items:center"><span class="label">Disponible</span>${pend.length?'<span class="chip-prov">Provisional</span>':''}</div>
-      <div class="big num">${fmt(t.disp)}</div>
+      <div class="big num">${t.disp<0?'−':''}${fmt(t.disp)}</div>
     </button>
     <button class="debt-row" type="button" data-a="tab" data-s="cuentas" style="width:100%"><span class="muted">Tarjetas por pagar</span><span class="v num">${fmt(t.tarj)}</span></button>
     ${pend.length?`<div class="warn">${I('alert')}<div><b>Cifras provisionales.</b> ${pend.length===1?'1 cuenta tiene':pend.length+' cuentas tienen'} el saldo por confirmar (${pend.map(a=>a.name).join(', ')}). Estas cifras todavía no son un saldo validado.</div></div>`:''}
   </div>
 
-  ${nq.pending && !S.askLater && firstNequi ? `<div class="section card ask">
-    <h3>¿Cuánto tenías en Nequi antes de este movimiento?</h3>
+  ${nq && !S.askLater ? `<div class="section card ask">
+    <h3>¿Cuánto ${nq.cls==='deuda'?'debías':'tenías'} en ${esc(nq.name)} antes de este movimiento?</h3>
     <div class="ctx">${esc(rowTitle(firstNequi))} · ${fmt(firstNequi.amt)} · ${shortDate(firstNequi.d)}</div>
-    <div class="amount-input"><span>$</span><input id="askAmt" inputmode="numeric" placeholder="0" aria-label="Saldo anterior de Nequi"></div>
-    <div class="row-btns"><button class="btn primary" type="button" data-a="ask-save">Guardar</button><button class="btn quiet" type="button" data-a="ask-later">Ahora no</button></div>
+    <div class="amount-input"><span>$</span><input id="askAmt" inputmode="numeric" placeholder="0" aria-label="Saldo anterior de ${esc(nq.name)}"></div>
+    <div class="row-btns"><button class="btn primary" type="button" data-a="ask-save" data-id="${nq.id}">Guardar</button><button class="btn quiet" type="button" data-a="ask-later">Ahora no</button></div>
   </div>`:''}
 
   ${S.pendiente.open?`<div class="section card pend">
@@ -261,19 +321,20 @@ screens.inicio = () => {
 
   <div class="section card">
     <button class="result-tap" type="button" data-a="go" data-s="resumen">
-      <span><div class="label">Resultado de septiembre</div><div class="v num ${r.res>=0?'pos':'neg'}">${r.res>=0?'Te sobraron':'Te faltaron'} ${fmt(r.res)}</div><div class="small muted">Ver resumen del mes</div></span>
+      <span><div class="label">Resultado de ${MESES[Number(TODAY.slice(5,7))-1]}</div><div class="v num ${r.res>=0?'pos':'neg'}">${r.res>=0?'Te sobraron':'Te faltaron'} ${fmt(r.res)}</div><div class="small muted">Ver resumen del mes</div></span>
       <span class="iconbtn">${I('chev')}</span>
     </button>
   </div>
 
   <div class="section">
     <div class="section-head"><span class="label">Últimos movimientos</span><button class="link" type="button" data-a="tab" data-s="movimientos">Ver todos</button></div>
-    <div class="list">${last.map(m=>mvRow(m)).join('')}</div>
+    ${last.length?`<div class="list">${last.map(m=>mvRow(m)).join('')}</div>`:`<div class="empty"><b>Todavía no hay movimientos</b>${A.length?'Toca Registrar para anotar el primero.':'Crea tus cuentas en la pestaña Cuentas.'}</div>`}
   </div>`;
 };
 
+function installText(){ const p=dparts(INSTALL); return `Empezaste a usar Finanzas JB el ${p.d} de ${MESES[p.m-1]}.`; }
 function monthSel(){
-  const prevOk = S.month>'2026-08', nextOk = S.month<'2026-09';
+  const prevOk = S.month>INSTALL.slice(0,7), nextOk = S.month<TODAY.slice(0,7);
   return `<div class="monthsel"><button class="iconbtn" type="button" data-a="month" data-d="-1" ${prevOk?'':'disabled'} aria-label="Mes anterior">${I('left')}</button><b>${monthName(S.month)}</b><button class="iconbtn" type="button" data-a="month" data-d="1" ${nextOk?'':'disabled'} aria-label="Mes siguiente">${I('right')}</button></div>`;
 }
 
@@ -289,8 +350,9 @@ screens.movimientos = () => {
   const catOpts = [...CATS,...INCATS.filter(c=>c.n!=='Otros')].map(c=>`<option value="${c.n}" ${f.cat===c.n?'selected':''}>${c.n}</option>`).join('');
   let list;
   if(!ms.length){
-    list = S.month<INSTALL.slice(0,7) ? `<div class="empty"><b>Sin movimientos en ${MESES[Number(S.month.slice(5))-1]}</b>Empezaste a usar Finanzas JB el 1 de septiembre.</div>`
-      : `<div class="empty"><b>Nada con este filtro</b>Quita el filtro para ver todo el mes.</div>`;
+    list = S.month<INSTALL.slice(0,7) ? `<div class="empty"><b>Sin movimientos en ${MESES[Number(S.month.slice(5))-1]}</b>${installText()}</div>`
+      : (f.acc||f.cat) ? `<div class="empty"><b>Nada con este filtro</b>Quita el filtro para ver todo el mes.</div>`
+      : `<div class="empty"><b>Sin movimientos en ${MESES[Number(S.month.slice(5))-1]}</b>Lo que registres aparecerá aquí.</div>`;
   } else {
     list = days.map(d=>{const dm=ms.filter(m=>m.d===d); return `<div class="day"><span>${dayLabel(d)}</span></div><div class="list">${dm.map(m=>mvRow(m)).join('')}</div>`;}).join('');
   }
@@ -331,16 +393,17 @@ screens.movdetalle = p => {
   const rows=[];
   if(m.type==='TRANSFERENCIA'){ rows.push(['Sale de',acc(m.from).name,m.from],['Entra a',acc(m.to).name,m.to]); }
   else rows.push(['Cuenta',acc(m.acc).name,m.acc]);
-  if(m.type==='GASTO'||m.type==='INGRESO'||m.type==='REEMBOLSO') rows.push(['Categoría', c ? c+(m.sub&&!S.classified[m.id]?' · '+m.sub:'') : '<span class="badge unc">Sin clasificar</span>']);
+  if(m.type==='GASTO'||m.type==='INGRESO'||m.type==='REEMBOLSO') rows.push(['Categoría', c ? c+(m.sub?' · '+m.sub:'') : '<span class="badge unc">Sin clasificar</span>']);
   if(m.type==='AJUSTE') rows.push(['Motivo','Apertura (saldo inicial)'],['Saldo escrito',fmt(m.amt)]);
   rows.push(['Fecha', longDate(m.d)],['Hora', m.t]);
   if(m.desc && m.type!=='AJUSTE') rows.push(['Descripción', esc(m.desc)]);
   if(m.phrase) rows.push(['Frase registrada','“'+esc(m.phrase)+'”']);
-  const linked = m.refundedBy&&!S.deleted.has(m.refundedBy) ? mov(m.refundedBy) : (m.link&&!S.deleted.has(m.link)?mov(m.link):null);
+  const refund = refundOf(m);
+  const linked = refund || (m.link ? mov(m.link) : null);
   let delMsg='';
   if(m.type==='AJUSTE') delMsg=`${acc(m.acc).name} volverá a quedar con saldo por confirmar.`;
   else if(m.type==='TRANSFERENCIA') delMsg=`${acc(m.from).name} y ${acc(m.to).name} vuelven a como estaban antes de este movimiento.`;
-  else { const a=acc(m.acc), nb=bal(a)-delta(m,a.id); delMsg = a.pending ? `${a.name} · saldo por confirmar.` : `${a.name} volverá a ${a.cls==='deuda'?'deber ':''}${fmt(nb)}.`; if(m.refundedBy) delMsg+=' El reembolso quedará sin compra enlazada.'; }
+  else { const a=acc(m.acc), nb=bal(a)-delta(m,a.id); delMsg = isPending(a) ? `${a.name} · saldo por confirmar.` : `${a.name} volverá a ${a.cls==='deuda'?'deber ':''}${fmt(nb)}.`; if(refund) delMsg+=' El reembolso quedará sin compra enlazada.'; }
   return `
   <div class="topbar"><button class="iconbtn" type="button" data-a="back" aria-label="Volver">${I('back')}</button><h1>Movimiento</h1></div>
   <div class="detail-hero">
@@ -350,7 +413,7 @@ screens.movdetalle = p => {
   </div>
   <div class="effect">${I('info')}<div>${effectText(m)}</div></div>
   <div class="section kv">${rows.map(r=>r[2]?`<div class="r"><span class="k">${r[0]}</span><button class="v" type="button" data-a="go" data-s="cuentadetalle" data-id="${r[2]}" style="color:var(--accent)">${r[1]} ›</button></div>`:`<div class="r"><span class="k">${r[0]}</span><span class="v">${r[1]}</span></div>`).join('')}</div>
-  ${linked?`<button class="linkrow" type="button" data-a="go" data-s="movdetalle" data-id="${linked.id}">${I('link')}<span class="t"><div>${m.refundedBy?'Reembolsado el '+shortDate(linked.d):'Compra enlazada: '+esc(linked.desc)}</div><div>${m.refundedBy?esc(linked.desc)+' · +'+fmt(linked.amt):shortDate(linked.d)+' · '+fmt(linked.amt)}</div></span>${I('chev')}</button>`:''}
+  ${linked?`<button class="linkrow" type="button" data-a="go" data-s="movdetalle" data-id="${linked.id}">${I('link')}<span class="t"><div>${refund?'Reembolsado el '+shortDate(linked.d):'Compra enlazada: '+esc(linked.desc)}</div><div>${refund?esc(linked.desc)+' · +'+fmt(linked.amt):shortDate(linked.d)+' · '+fmt(linked.amt)}</div></span>${I('chev')}</button>`:''}
   <div class="actions">
     ${m.type==='GASTO'&&!c?`<button class="actbtn" type="button" data-a="ui" data-k="classify">${I('tag')}<span>Clasificar<span class="sub">Elige su categoría</span></span></button>
       ${u.classify?`<div class="picker"><span class="label">Categoría</span><div class="opts">${CATS.map(x=>`<button class="opt" type="button" data-a="classify" data-id="${m.id}" data-v="${x.n}">${x.n}</button>`).join('')}</div></div>`:''}`:''}
@@ -372,7 +435,7 @@ screens.resumen = () => {
   return `
   <div class="topbar"><button class="iconbtn" type="button" data-a="back" aria-label="Volver">${I('back')}</button><h1>Resumen del mes</h1></div>
   ${monthSel()}
-  ${empty?`<div class="empty"><b>Sin datos en ${MESES[Number(S.month.slice(5))-1]}</b>Empezaste a usar Finanzas JB el 1 de septiembre.</div>`:`
+  ${empty?`<div class="empty"><b>Sin datos en ${MESES[Number(S.month.slice(5))-1]}</b>${S.month<INSTALL.slice(0,7)?installText():'Todavía no hay movimientos este mes.'}</div>`:`
   <div class="res-hero">
     <div class="label">Resultado del mes</div>
     <div class="big num ${r.res>=0?'pos':'neg'}">${fmt(r.res)}</div>
@@ -420,17 +483,18 @@ screens.cuentas = () => {
   ${groups.map(([title,fn,subLabel])=>{
     const list=active().filter(fn); if(!list.length) return '';
     const sum=list.reduce((s,a)=>s+bal(a),0);
-    const gp=list.some(a=>a.pending);
+    const gp=list.some(a=>isPending(a));
     let sub;
     if(title==='Personas'){ const te=list.filter(a=>bal(a)>0).reduce((s,a)=>s+bal(a),0), de=list.filter(a=>bal(a)<0).reduce((s,a)=>s+bal(a),0); sub=`Te deben ${fmt(te)} · Debes ${fmt(de)}`; }
     else sub=`${subLabel} ${fmt(sum)}`;
     return `<div class="grp"><div class="grp-head"><span class="label">${title}</span><span class="sub num">${sub}${gp?' <span class="chip-prov">Provisional</span>':''}</span></div>
       <div class="list">${list.map(a=>{const w=words(a); return `<button class="acc" type="button" data-a="go" data-s="cuentadetalle" data-id="${a.id}">
         <span class="av">${initials(a.name)}</span>
-        <span class="n"><div>${esc(a.name)}</div>${a.pending?'<span class="chip-prov">Saldo por confirmar</span>':`<div class="w">${w.w}</div>`}</span>
+        <span class="n"><div>${esc(a.name)}</div>${isPending(a)?'<span class="chip-prov">Saldo por confirmar</span>':`<div class="w">${w.w}</div>`}</span>
         <span class="m ${a.cls==='persona'&&bal(a)>0?'pos':''}">${w.v||'$0'}</span>
       </button>`;}).join('')}</div></div>`;
   }).join('')}
+  ${active().length?'':`<div class="empty"><b>Todavía no tienes cuentas</b>Crea la primera con Nueva cuenta.</div>`}
   <button class="newacc" type="button" data-a="newacc">${I('plus')} Nueva cuenta</button>`;
 };
 
@@ -444,16 +508,16 @@ screens.cuentadetalle = p => {
   <div class="topbar"><button class="iconbtn" type="button" data-a="back" aria-label="Volver">${I('back')}</button><h1>${esc(a.name)}</h1></div>
   <div class="detail-hero">
     <div class="small muted">${subtypeLabel(a)}${a.archived?' · <b>Archivada</b>':''}</div>
-    ${a.pending?`<div style="margin-top:8px"><span class="chip-prov">Saldo por confirmar</span></div>`:''}
+    ${isPending(a)?`<div style="margin-top:8px"><span class="chip-prov">Saldo por confirmar</span></div>`:''}
     <div class="big num ${a.cls==='persona'&&b>0?'pos':''}">${w.v||'$0'}</div>
     <div style="font-weight:700">${a.cls==='persona'&&b!==0?(b>0?a.name+' te debe '+w.v:'Le debes '+w.v+' a '+a.name):w.w+(w.v&&a.cls!=='persona'?' '+w.v:'')}</div>
   </div>
-  ${a.pending?`<div class="warn">${I('alert')}<div>Falta su saldo inicial. Este número solo suma lo que registraste desde que la creaste, así que es provisional.</div></div>`:''}
+  ${isPending(a)?`<div class="warn">${I('alert')}<div>Falta su saldo inicial. Este número solo suma lo que registraste desde que la creaste, así que es provisional.</div></div>`:''}
 
   <div class="section">
     <div class="section-head"><span class="label">Por qué este saldo</span></div>
     <div class="kv">
-      <div class="r"><span class="k">Saldo inicial</span><span class="v num">${a.pending?'<span class="chip-prov">Por confirmar</span>':signed(a.ap||0)}</span></div>
+      <div class="r"><span class="k">Saldo inicial</span><span class="v num">${isPending(a)?'<span class="chip-prov">Por confirmar</span>':signed(opening(a.id))}</span></div>
       <div class="r"><span class="k">+ Entradas</span><span class="v num">${fmt(f.inn)}</span></div>
       <div class="r"><span class="k">− Salidas</span><span class="v num">${fmt(f.out)}</span></div>
       <div class="r tot"><span class="k">= Saldo</span><span class="v num">${signed(b)}</span></div>
@@ -462,7 +526,7 @@ screens.cuentadetalle = p => {
 
   <div class="actions">
     ${a.archived?`<button class="actbtn" type="button" data-a="reactivate" data-id="${a.id}">${I('undo')}<span>Reactivar<span class="sub">Vuelve a Cuentas con su saldo intacto</span></span></button>`:`
-    ${a.pending?`<button class="actbtn" type="button" data-a="ui" data-k="confirm">${I('check')}<span>Confirmar saldo inicial<span class="sub">${a.cls==='deuda'?'¿Cuánto debías':'¿Cuánto tenías'} antes de su primer movimiento?</span></span></button>
+    ${isPending(a)?`<button class="actbtn" type="button" data-a="ui" data-k="confirm">${I('check')}<span>Confirmar saldo inicial<span class="sub">${a.cls==='deuda'?'¿Cuánto debías':'¿Cuánto tenías'} antes de su primer movimiento?</span></span></button>
       ${u.confirm?`<div class="card"><div class="amount-input"><span>$</span><input id="confAmt" inputmode="numeric" placeholder="0" aria-label="Saldo inicial"></div><div class="row-btns"><button class="btn primary" type="button" data-a="confirm-save" data-id="${a.id}">Guardar</button></div></div>`:''}`:''}
     <button class="actbtn" type="button" data-a="ui" data-k="real">${I('scale')}<span>Poner el saldo real<span class="sub">Crea un ajuste por la diferencia. Nunca es gasto ni ingreso.</span></span></button>
     ${u.real?`<div class="card"><div class="small muted" style="margin-bottom:8px">¿Cuánto ${a.cls==='deuda'?'debes':'hay'} realmente en ${esc(a.name)}?</div><div class="amount-input"><span>$</span><input id="realAmt" inputmode="numeric" placeholder="${fmt(b).slice(1)}" aria-label="Saldo real"></div><div class="row-btns"><button class="btn primary" type="button" data-a="toast-ui" data-k="real" data-t="Ajuste de conciliación creado (prototipo)">Guardar saldo real</button></div></div>`:''}
@@ -522,7 +586,7 @@ screens.menu = () => {
     ${arch.length?`<div class="list">${arch.map(a=>`<button class="acc" type="button" data-a="go" data-s="cuentadetalle" data-id="${a.id}"><span class="av">${initials(a.name)}</span><span class="n"><div>${esc(a.name)}</div><div class="w">${subtypeLabel(a)}</div></span><span class="m">${fmt(bal(a))}</span></button>`).join('')}</div>`:`<div class="empty" style="padding:16px">No tienes cuentas archivadas.</div>`}
   </div>
   <div class="menu-sec"><h2>Cuenta habitual</h2><p>La que se sugiere al registrar cuando todavía no hay historial.</p>
-    <div class="list">${habOpts.map(a=>`<button class="radio ${S.habitual===a.id?'on':''}" type="button" data-a="habitual" data-id="${a.id}"><span class="dotr"></span><span class="n">${esc(a.name)}</span></button>`).join('')}</div>
+    ${habOpts.length?'':'<div class="empty" style="padding:16px">Todavía no tienes cuentas para pagar.</div>'}<div class="list">${habOpts.map(a=>`<button class="radio ${habitual()===a.id?'on':''}" type="button" data-a="habitual" data-id="${a.id}"><span class="dotr"></span><span class="n">${esc(a.name)}</span></button>`).join('')}</div>
   </div>
   <div class="menu-sec"><h2>Categorías</h2><p>Solo consulta por ahora.</p>
     <div class="label" style="margin:10px 2px 8px">Gasto</div>
@@ -533,27 +597,32 @@ screens.menu = () => {
 };
 
 /* ---------- Hoja de captura ---------- */
-const EX = [
-  {phrase:'almuerzo 18 mil con nequi', d:{type:'GASTO', amt:18000, cat:'Comida', sub:'Restaurantes', acc:'nequi', date:TODAY}, prov:{cat:1}},
-  {phrase:'pagué la tarjeta 450 mil desde bancolombia', d:{type:'TRANSFERENCIA', amt:450000, from:'bancolombia', to:'visa', date:TODAY}, prov:{}},
-  {phrase:'el 31 de agosto taxi 20', d:{type:'GASTO', amt:20000, cat:'Transporte', sub:'Taxi y apps', acc:'efectivo', date:'2026-08-31'}, prov:{amt:1, acc:1}},
-  {phrase:'daniel me debe 50 mil', d:{type:'?', amt:50000, to:'daniel', date:TODAY}, prov:{}, ask:'persona'}
-];
+/* Frases de ejemplo mientras no existe el intérprete. Se arman con las cuentas del
+   usuario; si no tiene las cuentas que una frase necesita, esa frase no aparece. */
+function examples(){
+  const h=habitual(), card=active().find(a=>a.sub==='tarjeta'), per=active().find(a=>a.cls==='persona');
+  const from=active().find(a=>a.cls==='disp'), pe=dparts(PREV_MONTH_END), L=[];
+  if(h) L.push({phrase:'almuerzo 18 mil', d:{type:'GASTO', amt:18000, cat:'Comida', sub:'Restaurantes', acc:h, date:TODAY}, prov:{cat:1, acc:1}});
+  if(card&&from) L.push({phrase:'pagué la tarjeta 450 mil', d:{type:'TRANSFERENCIA', amt:450000, from:from.id, to:card.id, date:TODAY}, prov:{acc:1}});
+  if(h) L.push({phrase:`el ${pe.d} de ${MESES[pe.m-1]} taxi 20`, d:{type:'GASTO', amt:20000, cat:'Transporte', sub:'Taxi y apps', acc:h, date:PREV_MONTH_END}, prov:{amt:1, acc:1}});
+  if(per&&h) L.push({phrase:`${per.name.toLowerCase()} me debe 50 mil`, d:{type:'?', amt:50000, to:per.id, date:TODAY}, prov:{}, ask:'persona'});
+  return L;
+}
 function openSheet(m, id){
   if(!S.sheet) navPush('sheet');
   if(m==='mic') S.sheet={state:'listening', phrase:''};
   else if(m==='kbd') S.sheet={state:'typing', phrase:''};
-  else if(m==='pend') S.sheet={state:'card', phrase:S.pendiente.phrase, d:{type:'GASTO', amt:50000, cat:'Transporte', sub:'Gasolina', acc:S.habitual, date:TODAY}, prov:{acc:1}, fromPend:true};
+  else if(m==='pend') S.sheet={state:'typing', phrase:S.pendiente.phrase, fromPend:true};
   else if(m==='edit'){ const x=mov(id); S.sheet={state:'card', edit:id, phrase:x.phrase||'', d:{type:x.type, amt:x.amt, cat:catOf(x), sub:x.sub, acc:x.acc, from:x.from, to:x.to, date:x.d}, prov:{}}; }
-  else if(m==='move'){ const a=acc(id); S.sheet={state:'card', phrase:'pasar el saldo de '+a.name.toLowerCase(), d:{type:'TRANSFERENCIA', amt:Math.abs(bal(a)), from:a.id, to:a.id==='bancolombia'?'nequi':'bancolombia', date:TODAY}, prov:{acc:1}}; }
+  else if(m==='move'){ const a=acc(id), to=active().find(x=>x.id!==a.id&&x.cls==='disp'); if(!to){ toast('Primero crea otra cuenta para pasarle el saldo'); history.back(); return; } S.sheet={state:'card', phrase:'pasar el saldo de '+a.name.toLowerCase(), d:{type:'TRANSFERENCIA', amt:Math.abs(bal(a)), from:a.id, to:to.id, date:TODAY}, prov:{acc:1}}; }
   renderSheet();
 }
-function useExample(i){ const e=EX[i]; S.sheet={state:e.ask?'question':'card', phrase:e.phrase, d:Object.assign({},e.d), prov:Object.assign({},e.prov), ask:e.ask}; renderSheet(); }
+function useExample(i){ const e=examples()[i]; if(!e) return; S.sheet={state:e.ask?'question':'card', phrase:e.phrase, d:Object.assign({},e.d), prov:Object.assign({},e.prov), ask:e.ask}; renderSheet(); }
 
 function conseq(d){
   const L=[];
   const line=(ic,t)=>L.push(`<div class="l">${I(ic)}<span>${t}</span></div>`);
-  const after=(id,dl)=>{ const a=acc(id); if(a.pending) return `<b>${a.name}</b> · saldo por confirmar`; const nb=bal(a)+dl; return a.cls==='deuda'?`<b>${a.name}</b>: quedarás debiendo ${fmt(nb)}`:a.cls==='persona'?`<b>${a.name}</b> ${words(a,nb).w.toLowerCase()} ${words(a,nb).v}`:`<b>${a.name}</b> queda en ${fmt(nb)}`; };
+  const after=(id,dl)=>{ const a=acc(id); if(isPending(a)) return `<b>${a.name}</b> · saldo por confirmar`; const nb=bal(a)+dl; return a.cls==='deuda'?`<b>${a.name}</b>: quedarás debiendo ${fmt(nb)}`:a.cls==='persona'?`<b>${a.name}</b> ${words(a,nb).w.toLowerCase()} ${words(a,nb).v}`:`<b>${a.name}</b> queda en ${fmt(nb)}`; };
   if(d.type==='GASTO'){ line('info', d.cat?`Cuenta como gasto de ${d.cat}.`:'Cuenta como gasto, sin categoría por ahora.'); line('wallet', after(d.acc,-d.amt)); }
   else if(d.type==='INGRESO'){ line('info',`Cuenta como ingreso de ${d.cat}.`); line('wallet', after(d.acc,d.amt)); }
   else if(d.type==='REEMBOLSO'){ line('info',`Se resta del gasto de ${d.cat} del mes en que llega.`); line('wallet', after(d.acc,d.amt)); }
@@ -563,14 +632,14 @@ function conseq(d){
   return `<div class="conseq">${L.join('')}</div>`;
 }
 function fieldBtn(k,label,value,prov,wide){ return `<button class="field ${wide?'wide':''}" type="button" data-a="pick" data-k="${k}"><div class="k">${label}${prov?'<span class="dot" title="Deducido"></span>':''}</div><div class="v">${value}</div></button>`; }
-function dateText(s){ if(s===TODAY) return 'Hoy'; if(s==='2026-09-25') return 'Ayer'; return shortDate(s); }
+function dateText(s){ if(s===TODAY) return 'Hoy'; if(s===YESTERDAY) return 'Ayer'; return shortDate(s); }
 
 function sheetBody(){
   const sh=S.sheet;
   const head = t => `<div class="grab"></div><div class="sheet-head"><span class="label">${t}</span><button class="iconbtn" type="button" data-a="close" aria-label="Cancelar">${I('x')}</button></div>`;
-  const examples = `<div class="note" style="margin-top:14px">Frases de ejemplo (el intérprete todavía no está conectado):</div><div class="opts" style="margin-top:8px">${EX.map((e,i)=>`<button class="opt" type="button" data-a="ex" data-i="${i}">“${e.phrase}”</button>`).join('')}</div>`;
-  if(sh.state==='listening') return head('Registrar')+`<div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><div style="text-align:center;font-weight:700;font-size:18px">Escuchando…</div><div class="note" style="text-align:center">La voz no está activa en este prototipo.</div><div class="row-btns" style="justify-content:center"><button class="btn quiet" type="button" data-a="to-typing">${I('kbd')} Escribir en su lugar</button></div>${examples}`;
-  if(sh.state==='typing') return head('Registrar')+`<textarea class="ta" id="phraseIn" placeholder="Ej: almuerzo 18 mil con nequi" aria-label="Frase">${esc(sh.phrase)}</textarea><div class="row-btns"><button class="btn primary" type="button" data-a="interpret" style="flex:1">Continuar</button></div>${examples}`;
+  const exHtml = `<div class="note" style="margin-top:14px">Frases de ejemplo (el intérprete todavía no está conectado):</div><div class="opts" style="margin-top:8px">${examples().length?'':'<div class="note">Crea una cuenta para probar las frases de ejemplo.</div>'}${examples().map((e,i)=>`<button class="opt" type="button" data-a="ex" data-i="${i}">“${e.phrase}”</button>`).join('')}</div>`;
+  if(sh.state==='listening') return head('Registrar')+`<div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><div style="text-align:center;font-weight:700;font-size:18px">Escuchando…</div><div class="note" style="text-align:center">La voz no está activa en este prototipo.</div><div class="row-btns" style="justify-content:center"><button class="btn quiet" type="button" data-a="to-typing">${I('kbd')} Escribir en su lugar</button></div>${exHtml}`;
+  if(sh.state==='typing') return head('Registrar')+`<textarea class="ta" id="phraseIn" placeholder="Ej: almuerzo 18 mil" aria-label="Frase">${esc(sh.phrase)}</textarea><div class="row-btns"><button class="btn primary" type="button" data-a="interpret" style="flex:1">Continuar</button></div>${exHtml}`;
   if(sh.state==='registered') return `<div class="grab"></div><div class="done"><div class="ok">${I('check')}</div><h3>Registrado</h3><div class="muted">${esc(sh.phrase)}</div><div class="timer"><i></i></div><div class="note">Prototipo: no se guarda nada.</div><div class="row-btns" style="justify-content:center"><button class="btn quiet" type="button" data-a="undo">${I('undo')} Deshacer</button></div></div>`;
   const d=sh.d, p=sh.prov||{};
   const kinds={GASTO:['g','GASTO'],INGRESO:['i','INGRESO'],REEMBOLSO:['i','REEMBOLSO'],TRANSFERENCIA:['t','TRANSFERENCIA'],AJUSTE:['a','AJUSTE DE APERTURA'],'?':['t','¿QUÉ PASÓ?']}[d.type];
@@ -585,7 +654,7 @@ function sheetBody(){
     if(k==='cat') items=CATS.map(c=>[c.n,c.n]);
     if(k==='acc'||k==='from') items=active().filter(a=>a.cls==='disp'||a.sub==='tarjeta').map(a=>[a.id,a.name]);
     if(k==='to') items=active().filter(a=>a.id!==d.from).map(a=>[a.id,a.name]);
-    if(k==='date') items=[[TODAY,'Hoy'],['2026-09-25','Ayer'],['2026-08-31','31 ago']];
+    if(k==='date') items=[[TODAY,'Hoy'],[YESTERDAY,'Ayer'],[PREV_MONTH_END,shortDate(PREV_MONTH_END)]];
     if(k==='amt') picker=`<div class="picker"><span class="label">Monto</span><div class="amount-input"><span>$</span><input id="amtIn" inputmode="numeric" value="${fmt(d.amt).slice(1)}" aria-label="Monto"></div><div class="row-btns"><button class="btn primary" type="button" data-a="amt-ok">Listo</button></div></div>`;
     else picker=`<div class="picker"><span class="label">${{cat:'Categoría',acc:'Cuenta',from:'Sale de',to:'Entra a',date:'Fecha'}[k]}</span><div class="opts">${items.map(([v,n])=>`<button class="opt ${(d[k==='from'?'from':k==='to'?'to':k==='date'?'date':k]===v)?'on':''}" type="button" data-a="choose" data-k="${k}" data-v="${v}">${n}</button>`).join('')}</div></div>`;
   }
@@ -663,10 +732,13 @@ function openMap(){
 }
 function mapGo(s){
   document.getElementById('layer').innerHTML=''; S.sheet=null; S.ui={};
-  if(s==='__sheet'){ S.stack=[{s:'inicio'}]; render(); useExample(0); return; }
-  if(s==='widget'||s==='primeruso'){ S.stack=[{s}]; if(s==='primeruso') S.pu.step=1; render(); return; }
+  if(s==='__sheet'){ S.stack=[{s:'inicio'}]; render(); if(examples().length) useExample(0); else openSheet('kbd'); return; }
+  if(s==='widget'||s==='primeruso'){ S.stack=[{s}]; if(s==='primeruso') S.pu=puNew(); render(); return; }
   if(TABS.includes(s)){ tab(s); return; }
-  const base = {movdetalle:['movimientos',{id:'m13'}], resumen:['inicio',{}], cuentadetalle:['cuentas',{id:'nequi'}], cuentaform:['cuentas',{}], menu:['inicio',{}]}[s];
+  const lastMov=live().slice().sort(sortDesc)[0], firstAcc=active()[0];
+  if(s==='movdetalle'&&!lastMov){ tab('movimientos'); toast('Todavía no hay movimientos para ver su detalle'); return; }
+  if(s==='cuentadetalle'&&!firstAcc){ tab('cuentas'); toast('Todavía no hay cuentas para ver su detalle'); return; }
+  const base = {movdetalle:['movimientos',{id:lastMov&&lastMov.id}], resumen:['inicio',{}], cuentadetalle:['cuentas',{id:firstAcc&&firstAcc.id}], cuentaform:['cuentas',{}], menu:['inicio',{}]}[s];
   S.stack=[{s:base[0]}];
   if(s==='cuentaform') S.form={name:'', cls:'disp', sub:'', unk:false};
   go(s, base[1]);
@@ -689,15 +761,15 @@ document.addEventListener('click', e=>{
     case 'month': { const [y,m]=S.month.split('-').map(Number); const nm=m+Number(el.dataset.d); S.month=`${y}-${String(nm).padStart(2,'0')}`; render(); break; }
     case 'f-clear-cat': S.filter.cat=''; render(true); break;
     case 'cat-filter': tab('movimientos'); S.filter={acc:'', cat:v}; render(); break;
-    case 'ask-save': { const n=num(document.getElementById('askAmt').value); const q=acc('nequi'); q.ap=n; q.pending=false; render(true); toast('Nequi confirmada. Las cifras ya no son provisionales.'); break; }
+    case 'ask-save': { const q=acc(id), n=num(document.getElementById('askAmt').value), w=aperturaWhen(q.id); M.push(aperturaMov(q.id, q.cls==='deuda'?-n:n, w.d, w.t)); persist(); render(true); toast(q.name+(pendingAccs().length?' confirmada.':' confirmada. Las cifras ya no son provisionales.')); break; }
     case 'ask-later': S.askLater=true; render(true); break;
     case 'pend-discard': S.pendiente.open=false; render(true); toast('Captura descartada'); break;
-    case 'classify': S.classified[id]=v; S.ui={}; render(true); toast('Clasificado en '+v); break;
-    case 'del': S.deleted.add(id); { const m=mov(id); if(m.type==='AJUSTE'){ const ac=acc(m.acc); ac.pending=true; ac.ap=null; } } back(); toast('Movimiento eliminado'); break;
-    case 'confirm-save': { const ac=acc(id); ac.ap=(ac.cls==='deuda'?-1:1)*num(document.getElementById('confAmt').value); ac.pending=false; S.ui={}; render(true); toast('Saldo inicial confirmado'); break; }
-    case 'archive': acc(id).archived=true; S.stack=[{s:'cuentas'}]; S.ui={}; render(); toast('Cuenta archivada. Está en el Menú.'); break;
-    case 'reactivate': acc(id).archived=false; S.ui={}; render(true); toast('Cuenta reactivada'); break;
-    case 'habitual': S.habitual=id; render(true); break;
+    case 'classify': { const m=mov(id); m.cat=v; delete m.sub; persist(); } S.ui={}; render(true); toast('Clasificado en '+v); break;
+    case 'del': { const i=M.findIndex(x=>x.id===id); if(i>=0) M.splice(i,1); persist(); } back(); toast('Movimiento eliminado'); break;
+    case 'confirm-save': { const ac=acc(id), n=num(document.getElementById('confAmt').value), w=aperturaWhen(ac.id); M.push(aperturaMov(ac.id, ac.cls==='deuda'?-n:n, w.d, w.t)); persist(); S.ui={}; render(true); toast('Saldo inicial confirmado'); break; }
+    case 'archive': acc(id).archived=true; persist(); S.stack=[{s:'cuentas'}]; S.ui={}; render(); toast('Cuenta archivada. Está en el Menú.'); break;
+    case 'reactivate': acc(id).archived=false; persist(); S.ui={}; render(true); toast('Cuenta reactivada'); break;
+    case 'habitual': DB.preferencias.habitual=id; persist(); render(true); break;
     case 'newacc': S.form={name:'', cls:'disp', sub:'', unk:false}; go('cuentaform'); break;
     case 'acc-edit': { const ac=acc(id); S.form={id, name:ac.name, cls:ac.cls, sub:ac.sub}; go('cuentaform'); break; }
     case 'f-cls': S.form.cls=v; S.form.clsTouched=true; if(v==='deuda'&&!S.form.sub) S.form.sub='tarjeta'; render(true); break;
@@ -705,25 +777,51 @@ document.addEventListener('click', e=>{
     case 'f-ah': S.form.ah=v; S.form.cls = v==='apartada'?'ahorro':'disp'; render(true); break;
     case 'f-per': S.form.per=v; render(true); break;
     case 'f-save': { const f=S.form; const nm=(document.getElementById('fName').value||'').trim(); if(!nm){ toast('Escribe un nombre'); break; }
-      if(f.id){ acc(f.id).name=nm; back(); toast('Nombre actualizado'); break; }
-      const nid='n'+Date.now(); const amt=document.getElementById('fAmt'); let ap=amt?num(amt.value):0;
-      if(f.cls==='deuda') ap=-ap; if(f.cls==='persona'&&f.per==='ledebo') ap=-ap;
-      A.push({id:nid, name:nm, cls:f.cls, sub:f.cls==='deuda'?(f.sub||'tarjeta'):undefined, ap:f.unk?null:ap, pending:!!f.unk});
-      S.stack.pop(); go('cuentadetalle',{id:nid}); toast('Cuenta creada (prototipo)'); break; }
+      if(f.id){ acc(f.id).name=nm; persist(); back(); toast('Nombre actualizado'); break; }
+      const amt=document.getElementById('fAmt'), raw=amt?amt.value.trim():'';
+      const needs = f.cls==='persona' ? (f.per==='medebe'||f.per==='ledebo') : !f.unk;
+      if(needs && !raw){ toast(f.cls==='persona'?'Escribe el monto':'Escribe el saldo o marca No sé'); break; }
+      let saldo=num(raw); if(f.cls==='deuda') saldo=-saldo; if(f.cls==='persona'&&f.per==='ledebo') saldo=-saldo;
+      const c={id:window.FJB_STORE.newId('c'), name:nm, cls:f.cls}; if(f.cls==='deuda') c.sub=f.sub||'tarjeta';
+      A.push(c);
+      // El saldo de hoy entra como ajuste de apertura. "No sé" deja la cuenta con saldo por confirmar.
+      if(needs) M.push(aperturaMov(c.id, saldo, TODAY, hhmm(new Date())));
+      persist();
+      S.stack.pop(); go('cuentadetalle',{id:c.id}); toast('Cuenta creada'); break; }
     case 'pu-sel': S.pu.sel[id]=!S.pu.sel[id]; render(true); break;
+    case 'pu-otra': S.pu.otra = S.pu.otra ? null : {name:'', cls:'disp', sub:''}; render(true); if(S.pu.otra) setTimeout(()=>{const n=document.getElementById('puOtraName'); if(n) n.focus();},50); break;
+    case 'pu-otra-cls': S.pu.otra.cls=v; S.pu.otra.touched=true; if(v==='deuda'&&!S.pu.otra.sub) S.pu.otra.sub='tarjeta'; render(true); break;
+    case 'pu-otra-sub': S.pu.otra.sub=v; render(true); break;
+    case 'pu-otra-add': { const o=S.pu.otra, nm=(document.getElementById('puOtraName').value||'').trim(); if(!nm){ toast('Escribe un nombre'); break; }
+      if(puHas(nm)||puList().some(x=>x.name.toLowerCase()===nm.toLowerCase())){ toast('Esa cuenta ya está en la lista'); break; }
+      const x={id:'o'+Date.now(), name:nm, cls:o.cls, sub:o.cls==='deuda'?(o.sub||'tarjeta'):''}; S.pu.extra.push(x); S.pu.sel[x.id]=true; S.pu.otra=null; render(true); break; }
     case 'pu-hab': S.pu.hab=id; render(true); break;
-    case 'pu-next': if(S.pu.step===2){ Object.keys(S.pu.sel).forEach(i=>{const inp=document.getElementById('pu-'+i); if(inp&&!inp.disabled) S.pu.amt[i]=inp.value;}); } S.pu.step=Math.min(4,S.pu.step+1); render(); break;
-    case 'pu-back': S.pu.step=Math.max(1,S.pu.step-1); render(); break;
-    case 'pu-skip': case 'pu-done': tab('inicio'); if(a==='pu-skip') toast('Empiezas solo con Efectivo'); break;
+    case 'pu-next': {
+      const pu=S.pu;
+      if(pu.step===1 && !puChosen().length){ toast('Elige al menos una cuenta o toca Saltar todo'); break; }
+      if(pu.step===2){
+        puChosen().forEach(x=>{const inp=document.getElementById('pu-'+x.id); if(inp&&!inp.disabled) pu.amt[x.id]=inp.value;});
+        if(puChosen().some(x=>!pu.unk[x.id]&&!String(pu.amt[x.id]||'').trim())){ toast('Escribe cada monto o marca No sé'); break; }
+      }
+      pu.step=Math.min(4,pu.step+1);
+      // Sin cuentas para pagar no hay nada que elegir en el paso 3.
+      if(pu.step===3 && !puChosen().some(x=>x.cls==='disp'||x.sub==='tarjeta') && !active().some(a=>a.cls==='disp'||a.sub==='tarjeta')) pu.step=4;
+      render(); break; }
+    case 'pu-back': S.pu.step=Math.max(1,S.pu.step-1); if(S.pu.step===3 && !puChosen().some(x=>x.cls==='disp'||x.sub==='tarjeta') && !active().some(a=>a.cls==='disp'||a.sub==='tarjeta')) S.pu.step=2; render(); break;
+    case 'pu-skip': case 'pu-done':
+      // Desde aquí la app deja de ser una instalación nueva, aunque no se haya creado nada.
+      if(a==='pu-done') puFinish();
+      persist(); window.FJB_STORE.persist(); S.pu=null; tab('inicio');
+      toast(a==='pu-skip' ? 'Puedes crear tus cuentas cuando quieras en Cuentas' : 'Listo, ya puedes empezar'); break;
     case 'sheet': openSheet(el.dataset.m, id); break;
     case 'close': closeSheet(); break;
     case 'ex': useExample(Number(el.dataset.i)); break;
     case 'to-typing': if(S.sheet.state==='registered') break; S.sheet.state='typing'; renderSheet(); setTimeout(()=>{const t=document.getElementById('phraseIn'); if(t) t.focus();},50); break;
-    case 'interpret': { const t=document.getElementById('phraseIn').value.trim(); const i=EX.findIndex(x=>x.phrase===t.toLowerCase()); if(i>=0) useExample(i); else { S.sheet.phrase=t; renderSheet(); toast('El intérprete llega en otra iteración. Elige una frase de ejemplo.'); } break; }
+    case 'interpret': { const t=document.getElementById('phraseIn').value.trim(); const i=examples().findIndex(x=>x.phrase===t.toLowerCase()); if(i>=0) useExample(i); else { S.sheet.phrase=t; renderSheet(); toast('El intérprete llega en otra iteración. Elige una frase de ejemplo.'); } break; }
     case 'pick': if(S.sheet.state==='registered') break; S.sheet.picker = S.sheet.picker===k?null:k; renderSheet(); if(k==='amt') setTimeout(()=>{const i=document.getElementById('amtIn'); if(i) i.focus();},50); break;
     case 'choose': { const d=S.sheet.d; if(k==='cat'){ d.cat=v; d.sub=(CATS.find(c=>c.n===v).subs||[])[0]; } else d[k]=v; if(S.sheet.prov) S.sheet.prov[k==='from'?'acc':k]=0; S.sheet.picker=null; renderSheet(); break; }
     case 'amt-ok': S.sheet.d.amt=num(document.getElementById('amtIn').value); S.sheet.prov.amt=0; S.sheet.picker=null; renderSheet(); break;
-    case 'answer': { const d=S.sheet.d; if(v==='ahora'){ d.type='TRANSFERENCIA'; d.from=S.habitual; S.sheet.prov={acc:1}; } else { d.type='AJUSTE'; } S.sheet.state='card'; S.sheet.ask=null; renderSheet(); break; }
+    case 'answer': { const d=S.sheet.d; if(v==='ahora'){ d.type='TRANSFERENCIA'; d.from=habitual(); S.sheet.prov={acc:1}; } else { d.type='AJUSTE'; } S.sheet.state='card'; S.sheet.ask=null; renderSheet(); break; }
     case 'register': if(S.sheet.state!=='card') break;
       if(S.sheet.edit){ closeSheet(); toast('Cambios guardados (prototipo)'); break; }
       if(S.sheet.fromPend) S.pendiente.open=false;
@@ -737,11 +835,15 @@ document.addEventListener('change', e=>{
   const c=el.dataset.c;
   if(c==='f-acc'){ S.filter.acc=el.value; render(true); }
   if(c==='f-cat'){ S.filter.cat=el.value; render(true); }
-  if(c==='pu-unk'){ const i=el.dataset.id; const inp=document.getElementById('pu-'+i); if(inp&&!el.checked===false) S.pu.amt[i]=inp.value; S.pu.unk[i]=el.checked; render(true); }
+  if(c==='pu-unk'){ const i=el.dataset.id; const inp=document.getElementById('pu-'+i); if(inp&&!inp.disabled) S.pu.amt[i]=inp.value; S.pu.unk[i]=el.checked; puChosen().forEach(x=>{const n=document.getElementById('pu-'+x.id); if(n&&!n.disabled) S.pu.amt[x.id]=n.value;}); render(true); }
   if(c==='f-unk'){ S.form.unk=el.checked; S.form.name=document.getElementById('fName').value; render(true); }
 });
 document.addEventListener('input', e=>{
   const el=e.target;
+  if(el.dataset && el.dataset.c==='pu-otra-name' && S.pu && S.pu.otra){
+    const o=S.pu.otra; o.name=el.value;
+    if(!o.touched){ const d=deduce(el.value), cls=d.cls==='persona'?'disp':d.cls; if(cls!==o.cls||(d.sub||'')!==(o.sub||'')){ o.cls=cls; o.sub=d.sub||''; const pos=el.selectionStart; render(true); const n=document.getElementById('puOtraName'); n.focus(); n.setSelectionRange(pos,pos); } }
+  }
   if(el.dataset && el.dataset.c==='f-name' && S.form && !S.form.id){
     S.form.name=el.value;
     if(!S.form.clsTouched){ const d=deduce(el.value); const changed = d.cls!==S.form.cls || (d.sub||'')!==(S.form.sub||'') || !!d.askAhorro!==!!S.form.askAh; if(changed){ S.form.cls = S.form.ah==='apartada'&&d.askAhorro?'ahorro':d.cls; S.form.sub=d.sub||''; S.form.askAh=!!d.askAhorro; const pos=el.selectionStart; render(true); const n=document.getElementById('fName'); n.focus(); n.setSelectionRange(pos,pos); } }
@@ -751,7 +853,9 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape'){ if(S.sheet) clos
 
 /* Arranque: #inicio, #widget, #primeruso, #movimientos, #cuentas, #resumen, #menu */
 const h=(location.hash||'').slice(1);
-if(h==='widget'||h==='primeruso') S.stack=[{s:h}];
+// Instalación nueva: nada guardado todavía, así que empieza por "¿Cuánto tienes hoy?".
+if(FIRST_RUN){ S.stack=[{s:'primeruso'}]; S.pu=puNew(); }
+else if(h==='widget'||h==='primeruso'){ S.stack=[{s:h}]; if(h==='primeruso') S.pu=puNew(); }
 else if(TABS.includes(h)) S.stack=[{s:h}];
 else if(h==='resumen'||h==='menu') S.stack=[{s:'inicio'},{s:h}];
 render();

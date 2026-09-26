@@ -1,9 +1,9 @@
 /* Finanzas JB · service worker: permite instalar la app y abrirla sin conexión.
    Cambia VERSION en cada despliegue para que los celulares tomen la versión nueva. */
-const VERSION = 'fjb-v0.1.0';
+const VERSION = 'fjb-v0.2.0';
 const ARCHIVOS = [
   './', 'index.html', 'css/app.css',
-  'js/datos-ejemplo.js', 'js/store.js', 'js/app.js',
+  'js/store.js', 'js/app.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'
 ];
 
